@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from ... import web
+from ... import pipeline, web
 from . import service
 
 router = APIRouter(prefix="/api/changes", tags=["M5 变更抵扣"])
@@ -17,6 +17,7 @@ def changes(request: Request) -> dict:
         "run_id": run["run_id"],
         "summary": service.summary(store, run["run_id"]),
         "changes": service.change_rows(store, run["run_id"]),
+        "components": service.component_rows(store, run["run_id"]),
     }
 
 
@@ -25,16 +26,11 @@ def rebuild(request: Request) -> dict:
     run = web.run_or_404(request)
     store = request.app.state.store
     settings = request.app.state.settings
-    built = service.rebuild(store, run["run_id"], settings)
-    from ..m4_proration import service as proration_service
-    from ..m6_invoices import service as invoice_service
-
-    amounts = proration_service.recompute_amounts(store, run["run_id"], settings)
-    invoices = invoice_service.rebuild(store, run["run_id"], settings)
+    rebuilt = pipeline.rebuild_derived(store, run["run_id"], settings)
     return {
         "run_id": run["run_id"],
-        "changes": built,
-        "proration": amounts,
-        "invoices": invoices["summary"],
-        "reconciliations": invoices["ledgers"],
+        "changes": rebuilt["changes"],
+        "proration": rebuilt["proration"],
+        "invoices": rebuilt["summary"],
+        "reconciliations": rebuilt["ledgers"],
     }

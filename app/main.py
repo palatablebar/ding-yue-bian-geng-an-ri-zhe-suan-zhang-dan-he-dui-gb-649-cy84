@@ -125,10 +125,12 @@ def create_app(settings: config.Settings | None = None) -> FastAPI:
         store = app.state.store
         run = app.state.ctx.current_run(request.query_params.get("run_id"))
         rows = change_service.change_rows(store, run["run_id"]) if run else []
+        components = change_service.component_rows(store, run["run_id"]) if run else []
         summary = change_service.summary(store, run["run_id"]) if run else {
             "changes": 0, "applied": 0, "superseded": 0, "flagged": 0,
             "components": 0, "credit_rows": 0, "credit_cents": 0}
-        return _render(request, "changes.html", "changes", changes=rows, summary=summary)
+        return _render(request, "changes.html", "changes", changes=rows,
+                       components=components, summary=summary)
 
     @app.get("/invoices")
     def page_invoices(request: Request):

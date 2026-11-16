@@ -32,10 +32,20 @@ def test_total_equals_charge_minus_credit(run_id, store):
 
 
 def test_round_adjust_flag(run_id, store):
-    # TRAP-24：这张账单的分量各自四舍五入会差 1 分，必须留下补差标记
+    # TRAP-24：分量各自四舍五入与合计不一致时，必须留下补差标记
+    from app.modules.m6_invoices import invoice as invoice_mod
+
+    # 主样例里同日撤回账单的各分量恰好整分，不需要补差
     invoices = {row["invoice_id"]: row for row in store.list_invoices(run_id)}
-    assert "R_ROUND_ADJUST" in invoices["INV-202602-SUB-1008"]["flags"]
-    assert invoices["INV-202602-SUB-1008"]["total_cents"] == 184286
+    assert "R_ROUND_ADJUST" not in invoices["INV-202602-SUB-1008"]["flags"]
+    assert invoices["INV-202602-SUB-1008"]["total_cents"] == 120000
+    # 检测器本身：10.005 + 20.005 各自入是分 1001+2001，合计入是 3001
+    adjusted = [{"exact_text": "10.005", "cents": 1001},
+                {"exact_text": "20.005", "cents": 2000}]
+    assert invoice_mod.round_adjusted(adjusted) is True
+    balanced = [{"exact_text": "10.00", "cents": 1000},
+                {"exact_text": "20.01", "cents": 2001}]
+    assert invoice_mod.round_adjusted(balanced) is False
 
 
 def test_invoice_flags_follow_changes(run_id, store):

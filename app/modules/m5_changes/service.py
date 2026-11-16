@@ -1,7 +1,7 @@
-"""M5 变更与抵扣：重建分段、生成抵扣行、落库。
+"""M5 变更与抵扣：重建分段、生成抵扣行、操作流水。
 
-重算入口只做一件事：从已归一的订阅与变更重建派生结构（分段、抵扣行），
-金额留给 M4，账单留给 M6；重跑结果与上次逐行一致。
+派生结构（分段、抵扣行）由 ``build_rows`` 在内存里一次算清，落库交给
+``app.pipeline.rebuild_derived`` 单事务完成；重跑结果与上次逐行一致。
 """
 from __future__ import annotations
 
@@ -11,9 +11,8 @@ from ..m6_invoices import invoice as invoice_mod
 from . import credit, segments as segments_mod
 
 
-def rebuild(store, run_id: str, settings) -> dict:
-    subs = store.list_subscriptions(run_id)
-    changes = store.list_changes(run_id)
+def build_rows(subs: list[dict], changes: list[dict]) -> dict:
+    """纯计算：从已归一的订阅与变更重建分段与抵扣行（不落库）。"""
     by_sub: dict[str, list[dict]] = {}
     for change in changes:
         by_sub.setdefault(change["sub_id"], []).append(change)
@@ -39,20 +38,24 @@ def rebuild(store, run_id: str, settings) -> dict:
                 "cents": 0,
                 "flags": component.flags,
             })
-
-    store.put_segments(run_id, segment_rows)
-    store.put_components(run_id, component_rows)
     return {
-        "segments": len(segment_rows),
-        "components": len(component_rows),
+        "segments": segment_rows,
+        "components": component_rows,
         "changes_applied": sum(1 for change in changes if change["applied"]),
         "changes_superseded": sum(1 for change in changes if not change["applied"]),
         "invoices": len({row["invoice_id"] for row in segment_rows}),
     }
 
 
+def _own_components(invoice_id: str, change_id: str,
+                    by_invoice: dict[str, list[dict]]) -> list[dict]:
+    """一条变更名下的抵扣行：只取 source 指向它的行，不把整张账单的行重复挂上。"""
+    source = f"change:{change_id}"
+    return [row for row in by_invoice.get(invoice_id, []) if row["source"] == source]
+
+
 def change_rows(store, run_id: str) -> list[dict]:
-    """变更序列 + 抵扣行，页面与接口共用同一份数据。"""
+    """变更序列 + 各自名下的抵扣行，页面与接口共用同一份数据。"""
     changes = store.list_changes(run_id)
     components = store.list_components(run_id)
     by_invoice: dict[str, list[dict]] = {}
@@ -68,9 +71,15 @@ def change_rows(store, run_id: str) -> list[dict]:
             "account": sub.get("account", ""),
             "invoice_id": invoice_id,
             "kind_label": config.KIND_LABELS.get(change["kind"], change["kind"]),
-            "components": by_invoice.get(invoice_id, []) if change["applied"] else [],
+            "components": (_own_components(invoice_id, change["change_id"], by_invoice)
+                           if change["applied"] else []),
         })
     return rows
+
+
+def component_rows(store, run_id: str) -> list[dict]:
+    """抵扣行平铺清单（含整期预缴）：页面表格用，保证每行只出现一次。"""
+    return store.list_components(run_id)
 
 
 def summary(store, run_id: str) -> dict:

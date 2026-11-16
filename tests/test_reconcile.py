@@ -36,7 +36,7 @@ def test_amount_ledger_cents(run_id, store):
     credit = int(totals["credit_cents"])
     invoices = int(totals["invoice_cents"])
     assert charge - credit == invoices == expected.TOTAL_CENTS
-    assert charge == 1688212 and credit == 613929
+    assert charge == 1530711 and credit == 540000
     ledger = [row for row in store.list_reconciliations(run_id)
               if row["ledger"] == "amount"][0]
     assert ledger["left_text"] == str(charge)

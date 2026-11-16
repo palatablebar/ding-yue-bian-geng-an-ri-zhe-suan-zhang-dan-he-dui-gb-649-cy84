@@ -2,7 +2,8 @@
 
 约定：
 - 金额列一律 TEXT（Decimal 字符串）加一份「分」整数，不落 float；
-- 一个批次的所有派生行在同一个事务里「先删后插」，失败整体回滚，不留半批；
+- 一个批次的所有派生行在同一个事务里「先删后插」，失败整体回滚，不留半批
+  （见 ``replace_derived``：分段、抵扣行、账单、对账、合计五张表同生共死）；
 - 页面只读本模块查询结果，不在模板里做业务计算。
 """
 from __future__ import annotations
@@ -178,6 +179,68 @@ def _loads(value: str, fallback):
         return json.loads(value) if value else fallback
     except (TypeError, ValueError):
         return fallback
+
+
+# ---------- 派生行写入（私有）：replace_derived 与各 put_* 共用同一组 SQL ----------
+
+def _insert_segments(conn, run_id: str, items: list[dict]) -> None:
+    conn.executemany(
+        """INSERT INTO segments (run_id, invoice_id, sub_id, seq, start_date,
+                end_date, days, plan, state, monthly, amount_exact, amount_cents,
+                flags_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [(run_id, item["invoice_id"], item["sub_id"], int(item["seq"]),
+          item["start_date"], item["end_date"], int(item["days"]), item["plan"],
+          item["state"], str(item.get("monthly", "")),
+          str(item.get("amount_exact", "0")), int(item.get("amount_cents", 0)),
+          json.dumps(item.get("flags", []), ensure_ascii=False)) for item in items],
+    )
+
+
+def _insert_components(conn, run_id: str, items: list[dict]) -> None:
+    conn.executemany(
+        """INSERT INTO components (run_id, invoice_id, sub_id, seq, kind, source,
+                label, days, monthly, exact_text, cents, flags_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [(run_id, item["invoice_id"], item["sub_id"], int(item["seq"]),
+          item["kind"], item.get("source", ""), item.get("label", ""),
+          int(item.get("days", 0)), str(item.get("monthly", "")),
+          str(item["exact"]), int(item["cents"]),
+          json.dumps(item.get("flags", []), ensure_ascii=False)) for item in items],
+    )
+
+
+def _insert_invoices(conn, run_id: str, items: list[dict]) -> None:
+    conn.executemany(
+        """INSERT INTO invoices (run_id, invoice_id, sub_id, account, period_start,
+                period_end, period_days, billed_days, free_days, charge_cents,
+                credit_cents, total_cents, exact_total, status, flags_json, source_row)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [(run_id, item["invoice_id"], item["sub_id"], item.get("account", ""),
+          item["period_start"], item["period_end"], int(item["period_days"]),
+          int(item["billed_days"]), int(item["free_days"]),
+          int(item["charge_cents"]), int(item["credit_cents"]),
+          int(item["total_cents"]), str(item.get("exact_total", "0")),
+          item.get("status", "ok"),
+          json.dumps(item.get("flags", []), ensure_ascii=False),
+          int(item.get("source_row", 0))) for item in items],
+    )
+
+
+def _insert_reconciliations(conn, run_id: str, items: list[dict]) -> None:
+    conn.executemany(
+        """INSERT INTO reconciliations (run_id, seq, ledger, label, left_text,
+                right_text, diff_text, status, note) VALUES (?,?,?,?,?,?,?,?,?)""",
+        [(run_id, int(item["seq"]), item["ledger"], item["label"],
+          item["left_text"], item["right_text"], item["diff_text"],
+          item["status"], item.get("note", "")) for item in items],
+    )
+
+
+def _insert_totals(conn, run_id: str, totals: dict) -> None:
+    conn.executemany(
+        "INSERT INTO totals (run_id, key, value) VALUES (?,?,?)",
+        [(run_id, key, str(value)) for key, value in sorted(totals.items())],
+    )
 
 
 class Store:
@@ -379,16 +442,7 @@ class Store:
     def put_segments(self, run_id: str, items: list[dict]) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM segments WHERE run_id=?", (run_id,))
-            conn.executemany(
-                """INSERT INTO segments (run_id, invoice_id, sub_id, seq, start_date,
-                        end_date, days, plan, state, monthly, amount_exact, amount_cents,
-                        flags_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                [(run_id, item["invoice_id"], item["sub_id"], int(item["seq"]),
-                  item["start_date"], item["end_date"], int(item["days"]), item["plan"],
-                  item["state"], str(item.get("monthly", "")),
-                  str(item.get("amount_exact", "0")), int(item.get("amount_cents", 0)),
-                  json.dumps(item.get("flags", []), ensure_ascii=False)) for item in items],
-            )
+            _insert_segments(conn, run_id, items)
 
     def list_segments(self, run_id: str, invoice_id: str | None = None) -> list[dict]:
         with self.connect() as conn:
@@ -407,29 +461,11 @@ class Store:
             out.append(data)
         return out
 
-    def update_segment_amounts(self, run_id: str, items: list[dict]) -> None:
-        with self.connect() as conn:
-            conn.executemany(
-                "UPDATE segments SET amount_exact=?, amount_cents=? "
-                "WHERE run_id=? AND invoice_id=? AND seq=?",
-                [(str(item["amount_exact"]), int(item["amount_cents"]), run_id,
-                  item["invoice_id"], int(item["seq"])) for item in items],
-            )
-
     # ---------- 抵扣行 ----------
     def put_components(self, run_id: str, items: list[dict]) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM components WHERE run_id=?", (run_id,))
-            conn.executemany(
-                """INSERT INTO components (run_id, invoice_id, sub_id, seq, kind, source,
-                        label, days, monthly, exact_text, cents, flags_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                [(run_id, item["invoice_id"], item["sub_id"], int(item["seq"]),
-                  item["kind"], item.get("source", ""), item.get("label", ""),
-                  int(item.get("days", 0)), str(item.get("monthly", "")),
-                  str(item["exact"]), int(item["cents"]),
-                  json.dumps(item.get("flags", []), ensure_ascii=False)) for item in items],
-            )
+            _insert_components(conn, run_id, items)
 
     def list_components(self, run_id: str, invoice_id: str | None = None) -> list[dict]:
         with self.connect() as conn:
@@ -452,20 +488,7 @@ class Store:
     def put_invoices(self, run_id: str, items: list[dict]) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM invoices WHERE run_id=?", (run_id,))
-            conn.executemany(
-                """INSERT INTO invoices (run_id, invoice_id, sub_id, account, period_start,
-                        period_end, period_days, billed_days, free_days, charge_cents,
-                        credit_cents, total_cents, exact_total, status, flags_json, source_row)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                [(run_id, item["invoice_id"], item["sub_id"], item.get("account", ""),
-                  item["period_start"], item["period_end"], int(item["period_days"]),
-                  int(item["billed_days"]), int(item["free_days"]),
-                  int(item["charge_cents"]), int(item["credit_cents"]),
-                  int(item["total_cents"]), str(item.get("exact_total", "0")),
-                  item.get("status", "ok"),
-                  json.dumps(item.get("flags", []), ensure_ascii=False),
-                  int(item.get("source_row", 0))) for item in items],
-            )
+            _insert_invoices(conn, run_id, items)
 
     def list_invoices(self, run_id: str) -> list[dict]:
         with self.connect() as conn:
@@ -506,10 +529,7 @@ class Store:
     def put_totals(self, run_id: str, totals: dict) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM totals WHERE run_id=?", (run_id,))
-            conn.executemany(
-                "INSERT INTO totals (run_id, key, value) VALUES (?,?,?)",
-                [(run_id, key, str(value)) for key, value in sorted(totals.items())],
-            )
+            _insert_totals(conn, run_id, totals)
 
     def list_totals(self, run_id: str) -> dict:
         with self.connect() as conn:
@@ -521,13 +541,7 @@ class Store:
     def put_reconciliations(self, run_id: str, items: list[dict]) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM reconciliations WHERE run_id=?", (run_id,))
-            conn.executemany(
-                """INSERT INTO reconciliations (run_id, seq, ledger, label, left_text,
-                        right_text, diff_text, status, note) VALUES (?,?,?,?,?,?,?,?,?)""",
-                [(run_id, int(item["seq"]), item["ledger"], item["label"],
-                  item["left_text"], item["right_text"], item["diff_text"],
-                  item["status"], item.get("note", "")) for item in items],
-            )
+            _insert_reconciliations(conn, run_id, items)
 
     def list_reconciliations(self, run_id: str) -> list[dict]:
         with self.connect() as conn:
@@ -552,9 +566,21 @@ class Store:
         return _loads(row["json"], {}) if row else None
 
     # ---------- 整体重算 ----------
-    def clear_derived(self, run_id: str) -> None:
-        """重算前清派生表；订阅、变更、隔离、输入摘要保留。"""
+    DERIVED_TABLES = ("segments", "components", "invoices", "reconciliations", "totals")
+
+    def replace_derived(self, run_id: str, *, segments: list[dict],
+                        components: list[dict], invoices: list[dict],
+                        reconciliations: list[dict], totals: dict) -> None:
+        """派生行整批替换：五张表在同一个事务里先删后插。
+
+        重算只在内存里算清全部新行后才调这里；任何一行写失败都整体回滚，
+        调用方看到的永远是上一份完整账单或下一份完整账单，不出现半批。
+        """
         with self.connect() as conn:
-            for table in ("segments", "components", "invoices", "stages", "totals",
-                          "reconciliations"):
+            for table in self.DERIVED_TABLES:
                 conn.execute(f"DELETE FROM {table} WHERE run_id=?", (run_id,))
+            _insert_segments(conn, run_id, segments)
+            _insert_components(conn, run_id, components)
+            _insert_invoices(conn, run_id, invoices)
+            _insert_reconciliations(conn, run_id, reconciliations)
+            _insert_totals(conn, run_id, totals)

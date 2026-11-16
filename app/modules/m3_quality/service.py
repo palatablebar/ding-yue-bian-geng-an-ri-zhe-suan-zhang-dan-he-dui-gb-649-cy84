@@ -295,15 +295,21 @@ def _normalize_changes(table, subs: list[dict], settings) -> tuple[list[dict], l
 
 
 def _resolve_same_day(records: list[dict], entries: list[dict], file: str) -> None:
-    """同一订阅同一本地日只允许一次变更生效；胜者按 (UTC, 变更号) 最小，结果与行序无关。"""
+    """同一订阅同一本地日的多条变更 = 一个「日终状态」事件。
+
+    变更按整日生效，所以一个本地日只有一个财务事实：当日最后一条变更生效后
+    的状态。日终条按 (UTC, 变更号, 行序) 全序取最后一条，结果与文件行序无关；
+    其余变更保留为操作事实（applied=0、superseded_by 指向日终条），不丢行。
+    """
     grouped: dict[tuple[str, str], list[dict]] = {}
     for record in records:
         grouped.setdefault((record["sub_id"], record["local_date"]), []).append(record)
     for (sub_id, day), group in sorted(grouped.items()):
         if len(group) == 1:
             continue
-        winner = min(group, key=lambda item: (item["effective_utc"], item["change_id"],
-                                              item["seq"]))
+        ordered = sorted(group, key=lambda item: (item["effective_utc"],
+                                                  item["change_id"], item["seq"]))
+        winner = ordered[-1]
         same_instant = len({item["effective_utc"] for item in group}) < len(group)
         if same_instant and "R_CHANGE_OVERLAP" not in winner["flags"]:
             winner["flags"].append("R_CHANGE_OVERLAP")
@@ -317,7 +323,7 @@ def _resolve_same_day(records: list[dict], entries: list[dict], file: str) -> No
             record["superseded_by"] = winner["change_id"]
             entries.append(_entry(file, record["row_no"], "R_SAME_DAY_MULTI",
                                   field="生效时间", raw=record["effective_local"],
-                                  detail=f"{sub_id} 当日由 {winner['change_id']} 生效"))
+                                  detail=f"{sub_id} 当日以 {winner['change_id']} 的日终状态为准"))
             if same_instant:
                 entries.append(_entry(file, record["row_no"], "R_CHANGE_OVERLAP",
                                       field="生效时间", raw=record["effective_local"],

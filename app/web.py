@@ -80,7 +80,8 @@ class Ctx:
     def current_run(self, run_id: str | None = None) -> dict | None:
         if run_id:
             return self.store.get_run(run_id)
-        return self.store.latest_run()
+        # 默认只看「完成」批次：失败批次留在列表里可审计，但不顶掉上一份完整账单
+        return self.store.latest_run(status="done")
 
     def require_run(self, run_id: str | None = None) -> dict | None:
         return self.current_run(run_id)

@@ -2,17 +2,15 @@
 
 编排留在 M1 是因为「采信一次」就是使用者眼里的一个动作；每个阶段仍然可以单独调
 （M2 日历、M3 隔离区、M4 折算重算、M5 变更重算、M6 账单、M7 导出）。
+派生数据的重算统一走 ``app.pipeline.rebuild_derived``：内存算清、单事务落库。
 """
 from __future__ import annotations
 
 import datetime as dt
 import time
 
-from ... import config, manifest
+from ... import config, manifest, pipeline
 from ..m3_quality import service as quality_service
-from ..m4_proration import service as proration_service
-from ..m5_changes import service as change_service
-from ..m6_invoices import service as invoice_service
 from . import columns as column_mod
 from . import reader
 
@@ -31,7 +29,7 @@ def _inputs(sub_table, change_table) -> list[dict]:
     ]
 
 
-def _stages(counters: dict, totals: dict, build: dict, prepared: dict) -> list[dict]:
+def _stages(counters: dict, totals: dict, built: dict, prepared: dict) -> list[dict]:
     distribution = prepared["distribution"]
     top = ", ".join(f"{row['code']}×{row['count']}" for row in distribution[:3]) or "无"
     days = totals.get("period_days", 0)
@@ -48,9 +46,9 @@ def _stages(counters: dict, totals: dict, build: dict, prepared: dict) -> list[d
          "quarantine_count": counters["quarantined_rows"], "note": top},
         {"stage": "changes", "in_count": counters["changes_kept"],
          "out_count": counters["changes_kept"] - counters.get("changes_superseded", 0),
-         "quarantine_count": 0, "note": f"分段 {build['segments']}"},
-        {"stage": "proration", "in_count": build["segments"],
-         "out_count": build["components"], "quarantine_count": 0,
+         "quarantine_count": 0, "note": f"分段 {built['segments']}"},
+        {"stage": "proration", "in_count": built["segments"],
+         "out_count": built["components"], "quarantine_count": 0,
          "note": f"精确合计 {totals.get('segment_exact_total', '0')}"},
         {"stage": "invoices", "in_count": counters["subs_kept"],
          "out_count": totals.get("invoices", 0), "quarantine_count": 0,
@@ -109,34 +107,40 @@ def import_sample(store, settings, subscriptions: str | None = None,
     })
     store.put_inputs(run_id, _inputs(sub_table, change_table))
 
-    prepared = quality_service.prepare(store, run_id, sub_table, change_table, settings)
-    counters = dict(prepared["counters"])
-    store.update_run(run_id, counters_json=counters)
+    try:
+        prepared = quality_service.prepare(store, run_id, sub_table, change_table,
+                                           settings)
+        counters = dict(prepared["counters"])
+        store.update_run(run_id, counters_json=counters)
 
-    built = change_service.rebuild(store, run_id, settings)
-    amounts = proration_service.recompute_amounts(store, run_id, settings)
-    invoices = invoice_service.rebuild(store, run_id, settings)
-    totals = dict(invoices["totals"])
-    totals["segment_exact_total"] = amounts["segment_exact_total"]
+        rebuilt = pipeline.rebuild_derived(store, run_id, settings)
+        built = rebuilt["changes"]
+        totals = dict(rebuilt["totals"])
 
-    stages = _stages(counters, totals, built, prepared)
-    store.put_stages(run_id, stages)
+        stages = _stages(counters, totals, built, prepared)
+        store.put_stages(run_id, stages)
 
-    digest = manifest.digest_parts([item["sha256"] for item in _inputs(
-        sub_table, change_table)])
-    finished_at = _now()
-    elapsed_ms = int((time.perf_counter() - clock) * 1000)
-    store.update_run(run_id, status="done", finished_at=finished_at, input_digest=digest)
-    data = manifest.build(
-        run_id=run_id, batch_key=key, settings=settings,
-        inputs=_inputs(sub_table, change_table),
-        params={"display_tz": settings.display_tz,
-                "subscriptions": sub_table.name, "changes": change_name},
-        started_at=started_at, finished_at=finished_at, elapsed_ms=elapsed_ms,
-        stages=stages, counters=counters, totals=totals,
-        reconciliations=invoices["ledgers"],
-    )
-    store.put_manifest(run_id, data)
+        digest = manifest.digest_parts([item["sha256"] for item in _inputs(
+            sub_table, change_table)])
+        finished_at = _now()
+        elapsed_ms = int((time.perf_counter() - clock) * 1000)
+        store.update_run(run_id, status="done", finished_at=finished_at,
+                         input_digest=digest)
+        data = manifest.build(
+            run_id=run_id, batch_key=key, settings=settings,
+            inputs=_inputs(sub_table, change_table),
+            params={"display_tz": settings.display_tz,
+                    "subscriptions": sub_table.name, "changes": change_name},
+            started_at=started_at, finished_at=finished_at, elapsed_ms=elapsed_ms,
+            stages=stages, counters=counters, totals=totals,
+            reconciliations=rebuilt["ledgers"],
+        )
+        store.put_manifest(run_id, data)
+    except Exception as exc:
+        # 失败不留半批：派生数据要么没写、要么已整体回滚；批次标失败，可重试
+        store.update_run(run_id, status="failed",
+                         note=f"{type(exc).__name__}: {exc}")
+        raise
 
     run = store.get_run(run_id) or {"run_id": run_id, "batch_key": key,
                                     "status": "done", "created_at": started_at,

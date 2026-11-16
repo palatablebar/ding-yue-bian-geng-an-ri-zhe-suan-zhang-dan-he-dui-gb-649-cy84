@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 UTC = dt.timezone.utc
 DISPLAY_TZ = "Asia/Shanghai"
 
-RULE_VERSION = "subbill/1.0.0"
+RULE_VERSION = "subbill/1.1.0"
 CENT = Decimal("0.01")
 DECIMAL_PREC = 34
 MONEY_UNIT = "元"

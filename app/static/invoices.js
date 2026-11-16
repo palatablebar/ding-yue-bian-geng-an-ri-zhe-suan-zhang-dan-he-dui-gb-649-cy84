@@ -59,6 +59,28 @@ function renderInvoice(body, data) {
       [row.days, true], [row.amount, true],
     ]),
   ));
+
+  if (data.operations && data.operations.length) {
+    const opHead = el("div", "block-head");
+    opHead.appendChild(el("h3", "", "操作流水"));
+    opHead.appendChild(el("span", "sub",
+      `差额合计 ${data.operations_net_exact}（精确值）· 事实记录，不另记账`));
+    body.appendChild(opHead);
+    body.appendChild(buildTable(
+      [["变更号", false], ["类型", false], ["生效(本地)", false], ["从", false],
+       ["到", false], ["结果", false], ["差额(元)", true]],
+      data.operations.map((row) => [
+        [row.change_id, false], [row.kind_label, false], [row.effective_local, false],
+        [row.from_label, false], [row.to_label, false],
+        [row.disposition === "effective"
+          ? "生效"
+          : `同日被替代 → ${row.superseded_by}`, false],
+        [row.delta, true],
+      ]),
+    ));
+    body.appendChild(el("p", "empty",
+      "操作差额按操作顺序链式计算：预缴 + 差额合计 = 账单额；同日升级又撤回的两条差额互相抵消。"));
+  }
 }
 
 async function loadInvoice(invoiceId) {

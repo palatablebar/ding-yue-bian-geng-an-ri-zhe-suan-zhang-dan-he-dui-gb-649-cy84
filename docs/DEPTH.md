@@ -32,7 +32,8 @@
 | TRAP-18 | 0 字节文件、只有表头、全是空行 | 一律「成功导入 0 行」，对账看不出来 | 三种空态三个原因码，数据行全部计入行数账 | `app/modules/m1_ingest/reader.py` | `tests/test_ingest.py::test_empty_states_distinct`、`tests/test_reconcile.py::test_rows_ledger_identity` |
 | TRAP-23 | 期间端点归属与相邻段接缝 | 两端都算，重复计一天 | 半开 `[start, end)`，相邻段 end 等于下段 start | `app/modules/m5_changes/segments.py`、`app/modules/m2_calendar/days.py` | `tests/test_calendar.py::test_adjacent_segments_cover_period`、`tests/test_changes.py::test_change_on_period_start_zero_day_segment` |
 | TRAP-24 | 抵扣行、补收行各自四舍五入 | 分完合计比总额多 1 分 | 最大余额法把差额补到小数余额最大的分量，负数抵扣同样成立 | `app/modules/m4_proration/rounding.py` | `tests/test_rounding.py::test_largest_remainder_keeps_total`、`tests/test_credit.py::test_component_cents_sum_to_invoice` |
-| TRAP-25 | 同一订阅同一时刻两条变更 | 取到哪条看文件顺序，重跑结果会变 | 同日只让 (生效时刻, 变更号) 最小的一条生效，其余标 `R_CHANGE_OVERLAP` 并记替代关系 | `app/modules/m3_quality/service.py`、`app/modules/m5_changes/segments.py` | `tests/test_changes.py::test_same_instant_overlap_deterministic`、`tests/test_invariants.py::test_change_order_independence` |
+| TRAP-25 | 同一订阅同一本地日多条变更（含同一时刻） | 取最早一条、丢掉较晚撤回，账单按已撤回的价格收满整期；或逐条追加扣补行导致重复计 | 同日折叠成一个「日终状态」：按 (UTC, 变更号, 行序) 全序取最后一条的状态，一天最多切一刀；其余变更留档 `R_SAME_DAY_MULTI` + `superseded_by`，差额进操作流水但不记账 | `app/modules/m3_quality/service.py`、`app/modules/m5_changes/segments.py`、`app/modules/m5_changes/operations.py` | `tests/test_changes.py::test_same_day_multi_last_write_wins`、`tests/test_operations.py::test_same_day_revert_bill_returns_to_original`、`tests/test_invariants.py::test_change_order_independence` |
+| TRAP-26 | 重算中途失败（库写了一半、进程被杀） | 分段是新的、抵扣行是旧的，账单页与导出各看一半 | 全部派生行内存算清后单事务「先删后插」，失败整体回滚；失败批次标 `failed`，页面默认只展示最近 `done` 批次 | `app/pipeline.py`、`app/store.py`（`replace_derived`）、`app/web.py` | `tests/test_atomic_rebuild.py` |
 
 ## 对账规则
 
@@ -41,6 +42,7 @@
 - 金额账：分段合计（分） = 抵扣合计（分） + 账单额合计（分）
 - 出账账：账单行数 = 有分段的账单数
 - 恒等式：预缴整期 − Σ抵扣 + Σ补收 = Σ(各段费率 × 段天数)
+- 操作流水恒等式：预缴整期 + Σ(各操作差额) = 账单额（差额为证据，不记账）
 
 ## 已知不覆盖
 

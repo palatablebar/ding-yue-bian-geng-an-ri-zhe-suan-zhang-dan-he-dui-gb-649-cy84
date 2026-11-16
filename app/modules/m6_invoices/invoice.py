@@ -24,13 +24,15 @@ def _sum_cents(components: list[dict], kind: str) -> int:
 
 def round_adjusted(components: list[dict]) -> bool:
     """分量各自四舍五入与合计四舍五入不一致时，说明用了最大余额法补差。"""
-    naive = sum(int((Decimal(row["exact_text"]) * 100).quantize(
-        Decimal("1"), rounding=ROUND_HALF_UP)) for row in components)
+    naive = sum(int((Decimal(row.get("exact_text", row.get("exact", "0"))) * 100)
+                    .quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                for row in components)
     allocated = sum(int(row["cents"]) for row in components)
     return naive != allocated
 
 
-def build_invoice(sub: dict, segments: list[dict], components: list[dict]) -> dict:
+def build_invoice(sub: dict, segments: list[dict], components: list[dict],
+                  change_flags: list[str] | None = None) -> dict:
     charge_cents = _sum_cents(components, "charge")
     credit_cents = -_sum_cents(components, "credit")
     total_cents = charge_cents - credit_cents
@@ -44,6 +46,9 @@ def build_invoice(sub: dict, segments: list[dict], components: list[dict]) -> di
         for code in row["flags"]:
             if code not in flags:
                 flags.append(code)
+    for code in change_flags or []:
+        if code not in flags:
+            flags.append(code)
     for code in sub["flags"]:
         if code not in flags:
             flags.append(code)
@@ -71,7 +76,9 @@ def build_invoice(sub: dict, segments: list[dict], components: list[dict]) -> di
     }
 
 
-def detail(invoice: dict, segments: list[dict], components: list[dict]) -> dict:
+def detail(invoice: dict, segments: list[dict], components: list[dict],
+           operations: list[dict] | None = None,
+           operations_net_exact: str = "0") -> dict:
     return {
         "invoice": {**invoice, "amount": rounding.cents_text(invoice["total_cents"])},
         "segments": [{
@@ -81,4 +88,6 @@ def detail(invoice: dict, segments: list[dict], components: list[dict]) -> dict:
         } for row in segments],
         "components": [{**row, "amount": rounding.cents_text(row["cents"])}
                        for row in components],
+        "operations": operations or [],
+        "operations_net_exact": operations_net_exact,
     }

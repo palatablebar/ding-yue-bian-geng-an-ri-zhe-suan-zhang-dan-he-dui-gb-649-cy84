@@ -69,8 +69,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for change in changes %}
-        {% for row in change.components %}
+        {% for row in components %}
         <tr>
           <td><code>{{ row.invoice_id }}</code></td>
           <td class="num">{{ row.seq + 1 }}</td>
@@ -85,7 +84,6 @@
             </div>
           </td>
         </tr>
-        {% endfor %}
         {% endfor %}
       </tbody>
     </table>

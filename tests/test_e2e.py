@@ -59,6 +59,6 @@ def test_recompute_endpoints_idempotent(client):
 def test_home_page_shows_totals(client):
     client.post("/api/subscriptions/import", json={})
     html = client.get("/").text
-    assert "10742.83" in html
+    assert "9907.11" in html
     assert "对账" in html
     assert "采信" in html

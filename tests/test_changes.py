@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 
 import expected
 from app.modules.m5_changes import segments as segment_mod
@@ -28,32 +29,58 @@ def test_late_change_applied_and_flagged(run_id, store):
         "2026-02-01", "2026-02-03", "2026-02-11"]
 
 
-def test_same_day_multi_earliest_wins(run_id, store):
-    # TRAP-25：同日两次变更只让最早的一条生效，另一条留档被替代
+def test_same_day_multi_last_write_wins(run_id, store):
+    # TRAP-25：同日升级又撤回，日终状态（最后一条）生效；较早一条留档被替代
     sub = _sub(store, run_id, "SUB-1008")
     changes = _changes(store, run_id, "SUB-1008")
     winner = [row for row in changes if row["applied"]]
     loser = [row for row in changes if not row["applied"]]
-    assert [row["change_id"] for row in winner] == ["CHG-0003"]
-    assert loser[0]["change_id"] == "CHG-0004"
-    assert loser[0]["superseded_by"] == "CHG-0003"
+    assert [row["change_id"] for row in winner] == ["CHG-0004"]
+    assert loser[0]["change_id"] == "CHG-0003"
+    assert loser[0]["superseded_by"] == "CHG-0004"
     assert "R_SAME_DAY_MULTI" in loser[0]["flags"]
+    # 撤回到原价 → 日终状态等于日前状态 → 当天不切段，账单回到原样
     built = segment_mod.build_segments(sub, changes)
-    assert [item.days for item in built] == [13, 15]
-    assert built[1].plan == "专业版"
-    assert built[1].monthly == 2400
+    assert [item.days for item in built] == [28]
+    assert built[0].plan == "标准版"
+    assert built[0].monthly == 1200
+
+
+def test_same_day_collapse_to_last_state():
+    # TRAP-25：同日多条变更且日终状态不同 → 一天只切一刀，用日终状态计价
+    sub = {
+        "plan": "标准版", "state": "active", "monthly": "1200.00",
+        "period_start": "2026-02-01", "period_end": "2026-03-01",
+    }
+
+    def change(change_id, hour, price, seq):
+        return {
+            "applied": True, "local_date": "2026-02-14", "seq": seq,
+            "change_id": change_id, "kind": "upgrade" if price > 1200 else "downgrade",
+            "new_plan": "专业版", "new_price": str(price),
+            "effective_utc": f"2026-02-13T{hour:02d}:00:00+00:00", "flags": [],
+        }
+
+    changes = [change("CHG-A", 1, 2400, 0), change("CHG-B", 16, 800, 1)]
+    built = segment_mod.build_segments(sub, changes)
+    assert [(item.days, item.monthly) for item in built] == [(13, Decimal("1200.00")),
+                                                             (15, Decimal("800"))]
+    # 与行序无关：打乱输入，结果只由 (UTC, 变更号, 行序) 决定
+    again = segment_mod.build_segments(sub, list(reversed(changes)))
+    assert [(item.days, item.plan, item.monthly) for item in again] == [
+        (item.days, item.plan, item.monthly) for item in built]
 
 
 def test_same_instant_overlap_deterministic(run_id, store):
     # TRAP-25：同一时刻两条变更，结果只由 (变更号, 行号) 决定，与输入顺序无关
     sub = _sub(store, run_id, "SUB-1015")
     changes = _changes(store, run_id, "SUB-1015")
-    assert {row["change_id"] for row in changes if row["applied"]} == {"CHG-0012"}
+    assert {row["change_id"] for row in changes if row["applied"]} == {"CHG-0013"}
     forward = segment_mod.build_segments(sub, changes)
     backward = segment_mod.build_segments(sub, list(reversed(changes)))
     assert [(item.days, item.plan) for item in forward] == [
         (item.days, item.plan) for item in backward]
-    assert forward[-1].monthly == 900
+    assert forward[-1].monthly == 300
 
 
 def test_out_of_period_change_not_applied(run_id, store):

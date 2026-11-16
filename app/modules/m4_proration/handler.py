@@ -1,12 +1,13 @@
 """M4 路由：折算明细与重算。
 
-重算只碰分段金额与抵扣行金额；账单由 M6 重新出，保证页面与接口看到同一份数。
+重算走 pipeline.rebuild_derived：内存算清、单事务整批替换，
+失败时旧账单原样保留；页面与接口看到同一份数。
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from ... import web
+from ... import pipeline, web
 from . import service
 
 router = APIRouter(prefix="/api/proration", tags=["M4 按日折算"])
@@ -29,13 +30,10 @@ def recompute(request: Request) -> dict:
     run = web.run_or_404(request)
     store = request.app.state.store
     settings = request.app.state.settings
-    result = service.recompute_amounts(store, run["run_id"], settings)
-    from ..m6_invoices import service as invoice_service
-
-    invoices = invoice_service.rebuild(store, run["run_id"], settings)
+    rebuilt = pipeline.rebuild_derived(store, run["run_id"], settings)
     return {
         "run_id": run["run_id"],
-        "proration": result,
-        "invoices": invoices["summary"],
-        "reconciliations": invoices["ledgers"],
+        "proration": rebuilt["proration"],
+        "invoices": rebuilt["summary"],
+        "reconciliations": rebuilt["ledgers"],
     }

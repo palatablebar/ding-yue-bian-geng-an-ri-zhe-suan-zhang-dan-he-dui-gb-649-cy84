@@ -14,7 +14,7 @@ def test_manifest_keys_and_digest(run_id, store, sample_dir):
     data = store.get_manifest(run_id)
     assert data["run_id"] == run_id
     assert data["check_digit"] == manifest.check_digit(run_id)
-    assert data["rule_version"] == "subbill/1.0.0"
+    assert data["rule_version"] == "subbill/1.1.0"
     names = [item["name"] for item in data["inputs"]]
     assert names == ["subscriptions_dirty.csv", "changes_dirty.csv"]
     for item in data["inputs"]:
